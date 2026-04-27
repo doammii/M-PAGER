@@ -9,6 +9,8 @@ Design rationale (from research proposal §2.4 Step 2):
 """
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Optional
 
 from umls_client import UMLSClient
 import config
@@ -83,24 +85,48 @@ def build_subgraphs_batch(
     client: UMLSClient,
     matched_cuis: dict,
     progress_interval: int = 50,
+    max_workers: int = None,
 ) -> list[dict]:
-    """Build 1-hop subgraphs for all matched CUIs."""
-    all_triples = []
+    """Build 1-hop subgraphs for all matched CUIs, parallelized across CUIs.
+
+    The UMLSClient's shared rate limiter keeps total request rate within the
+    UMLS ceiling regardless of worker count.
+    """
+    max_workers = max_workers or config.UMLS_MAX_WORKERS
     cui_list = list(matched_cuis.items())
+    n = len(cui_list)
+    per_cui_triples: list[Optional[list[dict]]] = [None] * n
 
-    for i, (cui, info) in enumerate(cui_list):
-        triples = build_1hop_subgraph(client, cui, seed_name=info.get("name", ""))
-        all_triples.extend(triples)
+    completed = 0
+    running_total = 0
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {
+            ex.submit(
+                build_1hop_subgraph, client, cui, info.get("name", "")
+            ): i
+            for i, (cui, info) in enumerate(cui_list)
+        }
+        for fut in as_completed(futures):
+            i = futures[fut]
+            triples = fut.result()
+            per_cui_triples[i] = triples
+            running_total += len(triples)
+            completed += 1
+            if completed % progress_interval == 0:
+                logger.info(
+                    f"  Subgraph progress: {completed}/{n} CUIs, "
+                    f"{running_total} triples collected"
+                )
 
-        if (i + 1) % progress_interval == 0:
-            logger.info(
-                f"  Subgraph progress: {i + 1}/{len(cui_list)} CUIs, "
-                f"{len(all_triples)} triples collected"
-            )
+    # Flatten in deterministic CUI order
+    all_triples: list[dict] = []
+    for triples in per_cui_triples:
+        if triples:
+            all_triples.extend(triples)
 
     logger.info(
         f"Subgraph collection complete: {len(all_triples)} triples "
-        f"from {len(cui_list)} seed CUIs"
+        f"from {n} seed CUIs"
     )
 
     if all_triples:

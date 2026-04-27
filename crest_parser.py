@@ -12,7 +12,6 @@ Role separation:
 """
 
 import os
-import re
 import logging
 from bs4 import BeautifulSoup, Tag
 
@@ -22,9 +21,12 @@ logger = logging.getLogger(__name__)
 
 
 def _clean_text(text: str) -> str:
-    """Normalize whitespace and strip a text string."""
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
+    """Normalize whitespace (any run → single space) and strip.
+
+    `' '.join(s.split())` is faster than a regex on Python whitespace and
+    avoids importing `re` just for this.
+    """
+    return " ".join(text.split())
 
 
 def _extract_recommendations_from_xml(xml_path: str) -> list[dict]:

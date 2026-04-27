@@ -1,9 +1,8 @@
 """
 LLM-based Entity Candidate Extractor (Stage 1)
 
-Uses all 127 UMLS Semantic Types with example entities in the prompt.
-Calls OpenAI GPT-5.4-mini via the Responses API (recommended for new projects).
-Chat Completions API is also available as a fallback.
+Uses all 127 UMLS Semantic Types with example entities in the prompt and
+calls OpenAI GPT via the Responses API.
 
 Ref: https://developers.openai.com/api/docs/guides/migrate-to-responses
 """
@@ -11,6 +10,7 @@ Ref: https://developers.openai.com/api/docs/guides/migrate-to-responses
 import json
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import config
 from semantic_types import build_prompt_semantic_section
@@ -240,7 +240,7 @@ def _parse_llm_response(response_text: str) -> list[dict]:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# LLM Call Functions (OpenAI GPT-5.4-mini)
+# LLM Call (OpenAI Responses API)
 # ──────────────────────────────────────────────────────────────────────
 
 # Module-level client singleton (reuse for connection pooling)
@@ -267,94 +267,26 @@ def call_openai(
     api_key: str = None,
     model: str = None,
 ) -> list[dict]:
-    """
-    Call OpenAI Responses API for entity extraction.
-
-    Uses the Responses API (recommended for all new projects per OpenAI docs).
-    - `instructions` parameter for system-level prompt
-    - `input` as list of messages for few-shot examples + actual query
-    - `response.output_text` helper for easy text extraction
-
-    Args:
-        recommendation: dict with keys text, guideline_context, etc.
-        api_key: OpenAI API key (defaults to config.OPENAI_API_KEY)
-        model: model name (defaults to config.LLM_MODEL = "gpt-5.4-mini")
-
-    Returns:
-        list of parsed entity dicts
-    """
+    """Call OpenAI Responses API for entity extraction; return parsed entities."""
     client = _get_openai_client(api_key)
     model = model or config.LLM_MODEL
 
-    system_prompt = _build_system_prompt()
-    user_message = _build_user_message(recommendation)
-
-    # Build input: few-shot examples + actual query
     input_messages = list(FEW_SHOT_EXAMPLES) + [
-        {"role": "user", "content": user_message},
+        {"role": "user", "content": _build_user_message(recommendation)},
     ]
 
     try:
         response = client.responses.create(
             model=model,
-            instructions=system_prompt,
+            instructions=_build_system_prompt(),
             input=input_messages,
             temperature=0.0,
             max_output_tokens=config.LLM_MAX_TOKENS,
             store=False,
         )
-        response_text = response.output_text
-        return _parse_llm_response(response_text)
-
+        return _parse_llm_response(response.output_text)
     except Exception as e:
         logger.error(f"OpenAI Responses API call failed: {e}")
-        return []
-
-
-def call_openai_chat_completions(
-    recommendation: dict,
-    api_key: str = None,
-    model: str = None,
-) -> list[dict]:
-    """
-    Fallback: Call OpenAI Chat Completions API for entity extraction.
-
-    Uses the `developer` role (replaces `system` for GPT-5.x+ models).
-    Chat Completions is supported indefinitely per OpenAI docs.
-
-    Args:
-        recommendation: dict with keys text, guideline_context, etc.
-        api_key: OpenAI API key
-        model: model name (defaults to config.LLM_MODEL)
-
-    Returns:
-        list of parsed entity dicts
-    """
-    client = _get_openai_client(api_key)
-    model = model or config.LLM_MODEL
-
-    system_prompt = _build_system_prompt()
-    user_message = _build_user_message(recommendation)
-
-    # Use "developer" role instead of "system" for GPT-5.x+ models
-    messages = [
-        {"role": "developer", "content": system_prompt},
-    ] + list(FEW_SHOT_EXAMPLES) + [
-        {"role": "user", "content": user_message},
-    ]
-
-    try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            max_completion_tokens=config.LLM_MAX_TOKENS,
-            temperature=0.0,
-        )
-        response_text = response.choices[0].message.content
-        return _parse_llm_response(response_text)
-
-    except Exception as e:
-        logger.error(f"OpenAI Chat Completions API call failed: {e}")
         return []
 
 
@@ -362,54 +294,78 @@ def call_openai_chat_completions(
 # Batch Processing
 # ──────────────────────────────────────────────────────────────────────
 
+def _extract_one(i: int, rec: dict, llm_fn) -> tuple[list[dict], bool]:
+    """Worker: extract entities from one recommendation. Returns (entities, failed)."""
+    try:
+        entities = llm_fn(rec)
+    except Exception as e:
+        logger.error(f"Entity extraction failed for rec #{i}: {e}")
+        return [], True
+
+    gid = rec.get("guideline_id", "")
+    strength = rec.get("strength", "")
+    text = rec.get("text", "")
+    for ent in entities:
+        ent["source_guideline_id"] = gid
+        ent["source_strength"] = strength
+        ent["source_text"] = text
+    return entities, False
+
+
 def extract_entities_batch(
     recommendations: list[dict],
     llm_fn=None,
     progress_interval: int = 10,
+    max_workers: int = None,
 ) -> list[dict]:
     """
-    Run entity extraction on a batch of recommendations.
+    Run entity extraction on a batch of recommendations, parallelized.
 
     Args:
         recommendations: list of recommendation dicts from crest_parser
         llm_fn: callable(recommendation_dict) -> list[entity_dicts]
                 defaults to call_openai (Responses API)
         progress_interval: log progress every N sentences
+        max_workers: parallel LLM workers (defaults to config.LLM_MAX_WORKERS)
 
     Returns:
-        list of entity dicts, each augmented with source metadata
+        list of entity dicts in original recommendation order, each augmented
+        with source metadata
     """
     if llm_fn is None:
         llm_fn = call_openai
+    max_workers = max_workers or config.LLM_MAX_WORKERS
 
-    all_entities = []
+    n = len(recommendations)
+    per_rec: list[tuple[list[dict], bool]] = [([], False)] * n
+    completed = 0
+
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {
+            ex.submit(_extract_one, i, rec, llm_fn): i
+            for i, rec in enumerate(recommendations)
+        }
+        for fut in as_completed(futures):
+            i = futures[fut]
+            per_rec[i] = fut.result()
+            completed += 1
+            if completed % progress_interval == 0:
+                running_total = sum(len(r[0]) for r in per_rec)
+                logger.info(
+                    f"  Entity extraction progress: {completed}/{n} "
+                    f"sentences, {running_total} entities so far"
+                )
+
+    all_entities: list[dict] = []
     failed_count = 0
-
-    for i, rec in enumerate(recommendations):
-        try:
-            entities = llm_fn(rec)
-        except Exception as e:
-            logger.error(f"Entity extraction failed for rec #{i}: {e}")
-            entities = []
+    for ents, failed in per_rec:
+        all_entities.extend(ents)
+        if failed:
             failed_count += 1
-
-        for ent in entities:
-            ent["source_guideline_id"] = rec.get("guideline_id", "")
-            ent["source_strength"] = rec.get("strength", "")
-            ent["source_text"] = rec.get("text", "")
-
-        all_entities.extend(entities)
-
-        if (i + 1) % progress_interval == 0:
-            logger.info(
-                f"  Entity extraction progress: {i + 1}/{len(recommendations)} "
-                f"sentences, {len(all_entities)} entities so far"
-            )
 
     logger.info(
         f"Entity extraction complete: {len(all_entities)} entities "
-        f"from {len(recommendations)} sentences "
-        f"({failed_count} failures)"
+        f"from {n} sentences ({failed_count} failures)"
     )
     return all_entities
 
