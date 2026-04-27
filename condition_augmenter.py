@@ -55,12 +55,39 @@ def _get_openai_client(api_key: str = None):
 # Prompt
 # ──────────────────────────────────────────────────────────────────
 
-CONDITION_SYSTEM_PROMPT = """Extract conditions from guideline sentences for medical triples. 4 types: numeric_threshold (age>=65), categorical_state (diagnosis=diabetes), medication_history (drug status), temporal_condition (within 72h). Only include conditions constraining the triple. Keep evidence_text ≤50 chars. Return a JSON object: {"results":[{"triple_index":<int>, ...}]}."""
+CONDITION_SYSTEM_PROMPT = """Extract structured conditions from guideline sentences that constrain medical triples.
 
-FEW_SHOT_USER = """Triple: ("Lung Neoplasms","screened_by","Low-dose CT")
-Rec: "screening recommended for adults aged 55-74, 30+ pack-years, quit within 15 years" [id: g42]"""
+[CONDITION TYPES — pick exactly one per condition]
+- numeric_threshold: numeric cutoffs / ranges / labs / age. Required: variable, comparator, value. Optional: unit.
+- categorical_state: diagnosis / state / risk / patient population (e.g. "pregnant", "type 2 diabetes"). Required: variable, value.
+- medication_history: current / prior drug exposure or failure. Required: drug, status. Optional: dose.
+- temporal_condition: time windows / follow-up / onset timing (e.g. "within 72h", "stable for 2 years"). Required: event, anchor, comparator. Optional: interval, interval_unit.
 
-FEW_SHOT_ASSISTANT = """{"results":[{"triple_index":0,"conditions":[{"type":"numeric_threshold","variable":"age","comparator":">=","value":55,"unit":"years","evidence_text":"aged 55-74"},{"type":"numeric_threshold","variable":"age","comparator":"<=","value":74,"unit":"years"},{"type":"numeric_threshold","variable":"smoking_pack_year","comparator":">=","value":30,"unit":"pack-years","evidence_text":"30+ pack-years"}],"condition_logic":"AND","condition_source":{"guideline_id":"g42","evidence_level":"sentence_aligned","evidence_texts":["aged 55-74","30+ pack-years"]}}]}"""
+[RULES]
+- Only attach conditions that actually constrain the triple relation; ignore unrelated mentions in the rec.
+- Age ranges split into two numeric_threshold conditions (e.g. "55-74 years" → age>=55 AND age<=74).
+- Each condition must include evidence_text (≤50 chars, verbatim phrase from the rec).
+- condition_logic must be one of "AND" | "OR" | "NOT" (use "AND" when only one condition).
+- condition_source: {"guideline_id", "evidence_level", "evidence_texts":[...]} — evidence_level is "sentence_aligned" when the condition is in the same recommendation sentence, "guideline_cooccurrence" when only co-located in the guideline, or "inferred".
+
+[OUTPUT]
+Return a JSON object {"results":[...]} with EXACTLY one entry per input triple_index (0..N-1). If a triple has no applicable condition, still include its entry with conditions:[]."""
+
+FEW_SHOT_USER = """[TRIPLES]
+Triple 0:
+  ("Lung Neoplasms", "screened_by", "Low-dose CT")
+Triple 1:
+  ("Lung Neoplasms", "is_a", "Neoplasm")
+
+[RECOMMENDATION SENTENCES]
+Rec for Triple 0:
+  "screening recommended for adults aged 55-74, 30+ pack-years, quit within 15 years"
+  [guideline_id: g42, strength: strong]
+Rec for Triple 1:
+  "screening recommended for adults aged 55-74, 30+ pack-years, quit within 15 years"
+  [guideline_id: g42, strength: strong]"""
+
+FEW_SHOT_ASSISTANT = """{"results":[{"triple_index":0,"conditions":[{"type":"numeric_threshold","variable":"age","comparator":">=","value":55,"unit":"years","evidence_text":"aged 55-74"},{"type":"numeric_threshold","variable":"age","comparator":"<=","value":74,"unit":"years","evidence_text":"aged 55-74"},{"type":"numeric_threshold","variable":"smoking_pack_year","comparator":">=","value":30,"unit":"pack-years","evidence_text":"30+ pack-years"},{"type":"temporal_condition","event":"smoking_cessation","anchor":"presentation","interval":15,"interval_unit":"years","comparator":"<=","evidence_text":"quit within 15 years"}],"condition_logic":"AND","condition_source":{"guideline_id":"g42","evidence_level":"sentence_aligned","evidence_texts":["aged 55-74","30+ pack-years","quit within 15 years"]}},{"triple_index":1,"conditions":[]}]}"""
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -257,12 +284,21 @@ def extract_conditions_batch(
         logger.error(f"Condition extraction LLM call failed: {e}")
         return []
 
+    finish_reason = response.choices[0].finish_reason
     data = _parse_condition_response(response.choices[0].message.content)
 
     expected = set(range(len(triples_batch)))
     seen = {r.get("triple_index", -1) for r in data if isinstance(r, dict)}
     missing = sorted(expected - seen)
     if not missing:
+        return data
+
+    # Clean stop with at least one parsed result → model intentionally omitted
+    # triples it judged to have no applicable condition. Fill with empty entries
+    # rather than retry (the model would just omit them again).
+    if finish_reason == "stop" and data:
+        for mi in missing:
+            data.append({"triple_index": mi, "conditions": []})
         return data
 
     if _retry_depth >= config.STAGE3_MAX_RETRY_DEPTH:
@@ -363,20 +399,30 @@ def _apply_parse_failed(triple: dict) -> None:
     triple["parse_failed"] = True
 
 
+_VALID_CONDITION_LOGIC = {"AND", "OR", "NOT"}
+
+
 def _apply_cr(triple: dict, cr: dict, recs: list[dict]) -> None:
     """Merge an LLM condition result into a triple."""
     valid_conditions = _normalize_conditions(cr.get("conditions", []))
-    source = cr.get("condition_source", {})
-    strength = recs[0].get("strength") if recs else None
+    source = cr.get("condition_source") or {}
+    rec0 = recs[0] if recs else {}
+
+    # Drop invalid condition_logic values (model occasionally emits "AND/OR" etc.)
+    cl = cr.get("condition_logic", "AND")
+    if cl not in _VALID_CONDITION_LOGIC:
+        cl = "AND"
 
     triple["conditions"] = valid_conditions
-    triple["condition_logic"] = cr.get("condition_logic", "AND") if valid_conditions else None
+    triple["condition_logic"] = cl if valid_conditions else None
     triple["condition_source"] = {
-        "guideline_id": source.get("guideline_id", ""),
+        # Fall back to the matched rec's guideline_id so empty-condition triples
+        # still carry their source — they were matched bidirectionally to a rec.
+        "guideline_id": source.get("guideline_id", "") or rec0.get("guideline_id", ""),
         "evidence_level": source.get("evidence_level", ""),
         "evidence_texts": source.get("evidence_texts", []),
     }
-    triple["recommendation_strength"] = strength
+    triple["recommendation_strength"] = rec0.get("strength")
     triple["conditions_json"] = (
         json.dumps(valid_conditions, ensure_ascii=False) if valid_conditions else "[]"
     )
@@ -462,19 +508,19 @@ def run_stage3(
 
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             futures = {
-                ex.submit(extract_conditions_batch, ct, cr): cs
+                ex.submit(extract_conditions_batch, ct, cr): (cs, len(ct))
                 for cs, ct, cr in chunks
             }
             for fut in as_completed(futures):
-                chunk_start = futures[fut]
+                chunk_start, chunk_len = futures[fut]
                 for r in fut.result():
                     if not isinstance(r, dict):
                         continue
                     local = r.get("triple_index", -1)
-                    if isinstance(local, int):
-                        abs_idx = chunk_start + local
-                        if 0 <= abs_idx < len(rep_results):
-                            rep_results[abs_idx] = r
+                    # Tight bound: must be within THIS chunk's actual length so a
+                    # stray index can't overwrite a different chunk's slot.
+                    if isinstance(local, int) and 0 <= local < chunk_len:
+                        rep_results[chunk_start + local] = r
                 completed += 1
                 if completed % progress_every == 0 or completed == len(chunks):
                     logger.info(f"  LLM progress: {completed}/{len(chunks)} chunks")
