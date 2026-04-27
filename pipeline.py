@@ -1,11 +1,12 @@
 """
 Medical KG Pipeline — Unified Entry Point
 
-Single CLI dispatching all four stages via subcommands:
+Single CLI dispatching all five stages via subcommands:
   Stage 0: CREST parsing & recommendation/context extraction
   Stage 1: Entity candidate extraction (LLM)
   Stage 2: UMLS layer construction (matching + triple extraction)
   Stage 3: Condition augmentation
+  Stage 4: Neo4j knowledge-graph construction
 
 Usage:
     # individual stages
@@ -13,9 +14,11 @@ Usage:
     python pipeline.py stage1 --openai-key sk-...
     python pipeline.py stage2 --umls-key ...
     python pipeline.py stage3 --max-triples 10
+    python pipeline.py stage4 --neo4j-password ... [--clear]
 
-    # full pipeline
+    # full pipeline (stages 0-3 by default; --end-stage 4 to also build the KG)
     python pipeline.py all --umls-key ... --openai-key ...
+    python pipeline.py all --end-stage 4 --neo4j-password ...
 
     # partial range or test slice
     python pipeline.py all --start-stage 1 --end-stage 2
@@ -347,6 +350,7 @@ def run_stage3(
     # ── Aggregate stats ──
     total_with_cond = sum(1 for t in augmented_triples if t.get("has_conditions"))
     total_cond = sum(len(t.get("conditions", [])) for t in augmented_triples)
+    total_parse_failed = sum(1 for t in augmented_triples if t.get("parse_failed"))
 
     cond_type_dist: dict = {}
     for t in augmented_triples:
@@ -366,6 +370,7 @@ def run_stage3(
             "total_triples": len(augmented_triples),
             "triples_with_conditions": total_with_cond,
             "triples_without_conditions": len(augmented_triples) - total_with_cond,
+            "triples_parse_failed": total_parse_failed,
             "total_conditions": total_cond,
             "condition_type_distribution": cond_type_dist,
             "recommendation_strength_distribution": strength_dist,
@@ -386,7 +391,69 @@ def run_stage3(
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Full Pipeline (all 4 stages)
+# Stage 4: Neo4j Knowledge Graph Construction
+# ──────────────────────────────────────────────────────────────────────
+
+def run_stage4(
+    output_dir: str = None,
+    neo4j_uri: str = None,
+    neo4j_user: str = None,
+    neo4j_password: str = None,
+    neo4j_database: str = None,
+    clear: bool = False,
+    batch_size: int = None,
+) -> dict:
+    """Stage 4: load Stage 3 augmented triples and build a Neo4j KG.
+
+    Lazy-imports neo4j_builder so stages 0-3 don't require the neo4j driver.
+    """
+    output_dir = output_dir or config.OUTPUT_DIR
+
+    triples_path = os.path.join(output_dir, config.OUTPUT_AUGMENTED_TRIPLES_FILE)
+    require_files(
+        {"stage3_condition_augmented_triples": triples_path},
+        hint="Run `python pipeline.py stage3` first.",
+    )
+
+    logger.info("=" * 60)
+    logger.info("STAGE 4: Neo4j Knowledge Graph Construction")
+    logger.info("=" * 60)
+
+    from neo4j_builder import build_graph_from_file
+
+    start_time = time.time()
+    result = build_graph_from_file(
+        triples_path=triples_path,
+        uri=neo4j_uri,
+        user=neo4j_user,
+        password=neo4j_password,
+        database=neo4j_database,
+        clear_first=clear,
+        batch_size=batch_size,
+    )
+    elapsed = time.time() - start_time
+
+    summary_path = os.path.join(output_dir, config.OUTPUT_NEO4J_SUMMARY_FILE)
+    save_json(
+        {
+            "metadata": {
+                "stage": 4,
+                "elapsed_seconds": round(elapsed, 1),
+                "timestamp": datetime.now().isoformat(),
+                "cleared_first": clear,
+            },
+            "result": result,
+        },
+        summary_path,
+    )
+
+    logger.info(f"Stage 4 complete in {elapsed:.1f}s")
+    logger.info(f"  Output: {summary_path}")
+    return result
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Full Pipeline (all 5 stages)
 # ──────────────────────────────────────────────────────────────────────
 
 def run_pipeline(
@@ -401,6 +468,12 @@ def run_pipeline(
     batch_size: int = None,
     max_workers_umls: int = None,
     max_workers_llm: int = None,
+    neo4j_uri: str = None,
+    neo4j_user: str = None,
+    neo4j_password: str = None,
+    neo4j_database: str = None,
+    neo4j_clear: bool = False,
+    neo4j_batch_size: int = None,
     start_stage: int = 0,
     end_stage: int = 3,
 ):
@@ -446,6 +519,17 @@ def run_pipeline(
             max_workers=max_workers_llm,
         )
 
+    if start_stage <= 4 <= end_stage:
+        run_stage4(
+            output_dir=output_dir,
+            neo4j_uri=neo4j_uri,
+            neo4j_user=neo4j_user,
+            neo4j_password=neo4j_password,
+            neo4j_database=neo4j_database,
+            clear=neo4j_clear,
+            batch_size=neo4j_batch_size,
+        )
+
     elapsed = time.time() - overall_start
     logger.info("=" * 60)
     logger.info(f"PIPELINE COMPLETE — total elapsed: {elapsed:.1f}s")
@@ -463,7 +547,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(
         dest="stage", required=True,
-        metavar="{stage0,stage1,stage2,stage3,all}",
+        metavar="{stage0,stage1,stage2,stage3,stage4,all}",
     )
 
     # ── stage0 ──
@@ -510,8 +594,25 @@ def _build_parser() -> argparse.ArgumentParser:
                     help=f"Parallel LLM workers (default: {config.LLM_MAX_WORKERS})")
     p3.add_argument("--log-level", default="INFO")
 
+    # ── stage4 ──
+    p4 = sub.add_parser("stage4", help="Neo4j knowledge-graph construction")
+    p4.add_argument("--output-dir", default=config.OUTPUT_DIR)
+    p4.add_argument("--neo4j-uri", default=None,
+                    help=f"Neo4j Bolt URI (default: {config.NEO4J_URI})")
+    p4.add_argument("--neo4j-user", default=None,
+                    help=f"Neo4j username (default: {config.NEO4J_USER})")
+    p4.add_argument("--neo4j-password", default=None,
+                    help="Neo4j password (or set NEO4J_PASSWORD env var)")
+    p4.add_argument("--neo4j-database", default=None,
+                    help=f"Neo4j database (default: {config.NEO4J_DATABASE})")
+    p4.add_argument("--clear", action="store_true",
+                    help="DESTRUCTIVE: wipe the database before loading")
+    p4.add_argument("--batch-size", type=int, default=None,
+                    help=f"UNWIND rows per batch (default: {config.NEO4J_BATCH_SIZE})")
+    p4.add_argument("--log-level", default="INFO")
+
     # ── all ──
-    pall = sub.add_parser("all", help="End-to-end pipeline (Stages 0-3)")
+    pall = sub.add_parser("all", help="End-to-end pipeline (Stages 0-4)")
     pall.add_argument("--xml-dir", default=None)
     pall.add_argument("--primary-dir", default=None)
     pall.add_argument("--semantic-groups", default=None)
@@ -530,8 +631,18 @@ def _build_parser() -> argparse.ArgumentParser:
     pall.add_argument("--max-workers-llm", type=int, default=None,
                       help=f"Stage 1 / Stage 3 parallel LLM workers "
                            f"(default: {config.LLM_MAX_WORKERS})")
-    pall.add_argument("--start-stage", type=int, default=0, choices=[0, 1, 2, 3])
-    pall.add_argument("--end-stage", type=int, default=3, choices=[0, 1, 2, 3])
+    pall.add_argument("--neo4j-uri", default=None)
+    pall.add_argument("--neo4j-user", default=None)
+    pall.add_argument("--neo4j-password", default=None)
+    pall.add_argument("--neo4j-database", default=None)
+    pall.add_argument("--neo4j-clear", action="store_true",
+                      help="DESTRUCTIVE: wipe Neo4j database before Stage 4")
+    pall.add_argument("--neo4j-batch-size", type=int, default=None)
+    pall.add_argument("--start-stage", type=int, default=0,
+                      choices=[0, 1, 2, 3, 4])
+    pall.add_argument("--end-stage", type=int, default=3,
+                      choices=[0, 1, 2, 3, 4],
+                      help="Default 3; pass 4 to also build the Neo4j KG")
     pall.add_argument("--log-level", default="INFO")
 
     return parser
@@ -572,6 +683,16 @@ def main():
             max_triples=args.max_triples,
             max_workers=args.max_workers,
         )
+    elif args.stage == "stage4":
+        run_stage4(
+            output_dir=args.output_dir,
+            neo4j_uri=args.neo4j_uri,
+            neo4j_user=args.neo4j_user,
+            neo4j_password=args.neo4j_password,
+            neo4j_database=args.neo4j_database,
+            clear=args.clear,
+            batch_size=args.batch_size,
+        )
     elif args.stage == "all":
         if args.start_stage > args.end_stage:
             parser.error("--start-stage must be <= --end-stage")
@@ -587,6 +708,12 @@ def main():
             batch_size=args.batch_size,
             max_workers_umls=args.max_workers_umls,
             max_workers_llm=args.max_workers_llm,
+            neo4j_uri=args.neo4j_uri,
+            neo4j_user=args.neo4j_user,
+            neo4j_password=args.neo4j_password,
+            neo4j_database=args.neo4j_database,
+            neo4j_clear=args.neo4j_clear,
+            neo4j_batch_size=args.neo4j_batch_size,
             start_stage=args.start_stage,
             end_stage=args.end_stage,
         )

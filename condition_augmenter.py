@@ -12,9 +12,14 @@ Matching strategy:
   Triple head/tail names are UMLS concept preferred names (e.g. "Carcinoma,
   Non-Small-Cell Lung"), while entity candidates use LLM-normalized forms
   (e.g. "Non-Small Cell Lung Carcinoma"). Direct string matching fails.
-  
+
   Solution: CUI-based matching via stage2_umls_matched.json.
     triple.head_cui → match_results → entity.source_guidelines → recommendations
+
+  Bidirectional filter: a triple is sent to the LLM only when head AND tail
+  both resolve to a shared recommendation. Triples without such a rec are
+  passed through with empty conditions (has_conditions=False) — kept in the
+  output for completeness but never consume LLM tokens.
 
 Condition types (4 only):
   - numeric_threshold, categorical_state, medication_history, temporal_condition
@@ -33,6 +38,11 @@ import config
 logger = logging.getLogger(__name__)
 
 _openai_client = None
+
+# UMLS CUI pattern: literal "C" + 7 digits. Tighter than startswith("C") to
+# avoid mis-classifying source codes that happen to start with "C" (e.g.
+# HCPCS "C1300") as CUIs.
+_CUI_RE = re.compile(r"^C\d{7}$")
 
 
 def _get_openai_client(api_key: str = None):
@@ -75,6 +85,12 @@ CONDITION_SYSTEM_PROMPT = """You extract structured conditions from clinical gui
 - Patient states, thresholds, time windows, medication status are CONDITIONS.
 - If no relevant condition exists, return empty conditions list.
 - Specify condition_logic: "AND" (default), "OR", or "NOT".
+
+[BREVITY RULES — CRITICAL FOR TOKEN BUDGET]
+- evidence_text MUST be a short key phrase (≤ 50 chars), NOT a full sentence quote.
+- evidence_texts array: AT MOST 2 short phrases; deduplicate.
+- Do NOT repeat the full guideline text or restate the triple.
+- Output compact JSON: no extra whitespace, no trailing commentary.
 
 [OUTPUT FORMAT]
 Return a JSON array. For each input triple, output one object:
@@ -210,14 +226,15 @@ def find_relevant_recommendations(
     max_recs: int = None,
 ) -> list[dict]:
     """
-    Find CREST recommendations relevant to a triple using CUI-based matching.
+    Find CREST recommendations that mention BOTH endpoints of the triple.
 
-    Lookup order:
-      1) head_cui in cui_to_recs
-      2) tail_id in cui_to_recs (if tail_id is a CUI)
-      3) head_name / tail_name in name_to_recs (fallback)
+    Bidirectional filter: a rec only qualifies when head AND tail both
+    resolve to it. Triples without any rec satisfying both endpoints get
+    an empty list and are skipped by the LLM downstream.
 
-    Prioritizes recommendations where BOTH head and tail CUIs map to the same rec.
+    Lookup order per endpoint:
+      - CUI-based: head_cui / tail_id (when tail_id starts with "C") in cui_to_recs
+      - name-based fallback: head_name / tail_name in name_to_recs
     """
     max_recs = max_recs or config.STAGE3_MAX_RECS_PER_TRIPLE
 
@@ -229,26 +246,22 @@ def find_relevant_recommendations(
     head_name = triple.get("head_name", "").lower().strip()
     tail_name = triple.get("tail_name", "").lower().strip()
 
-    # CUI-based lookup
     head_recs = cui_index.get(head_cui, set())
-    tail_recs = cui_index.get(tail_id, set()) if tail_id.startswith("C") else set()
+    tail_recs = cui_index.get(tail_id, set()) if _CUI_RE.match(tail_id) else set()
 
-    # Name-based fallback (for non-CUI tails or when CUI lookup yields nothing)
     if not head_recs:
         head_recs = name_index.get(head_name, set())
     if not tail_recs:
         tail_recs = name_index.get(tail_name, set())
 
-    # Priority 1: recs matching BOTH head and tail
     both = head_recs & tail_recs
-    # Priority 2: recs matching either
-    either = head_recs | tail_recs
+    if not both:
+        return []
 
-    selected = list(both)[:max_recs]
-    if len(selected) < max_recs:
-        remaining = [i for i in either if i not in both]
-        selected.extend(remaining[: max_recs - len(selected)])
-
+    # Sort for deterministic selection — set iteration order is hash-dependent
+    # and would otherwise make recs[0] (used for recommendation_strength) flaky
+    # across runs.
+    selected = sorted(both)[:max_recs]
     return [recommendations[i] for i in selected]
 
 
@@ -289,7 +302,12 @@ def _build_user_message(
 
 
 def _parse_condition_response(response_text: str) -> list[dict]:
-    """Parse LLM JSON array response."""
+    """Parse LLM JSON array response.
+
+    Handles truncated output (max_output_tokens hit) by salvaging the
+    completed objects up to the last closed `}` and synthesizing the
+    closing `]`.
+    """
     text = response_text.strip()
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
@@ -303,11 +321,15 @@ def _parse_condition_response(response_text: str) -> list[dict]:
             try:
                 data = json.loads(match.group())
             except json.JSONDecodeError:
-                logger.warning(f"Failed to parse condition response: {text[:200]}")
-                return []
+                data = _salvage_truncated_array(text)
+                if data is None:
+                    logger.warning(f"Failed to parse condition response: {text[:200]}")
+                    return []
         else:
-            logger.warning(f"No JSON array in condition response: {text[:200]}")
-            return []
+            data = _salvage_truncated_array(text)
+            if data is None:
+                logger.warning(f"No JSON array in condition response: {text[:200]}")
+                return []
 
     if isinstance(data, dict):
         data = [data]
@@ -315,13 +337,221 @@ def _parse_condition_response(response_text: str) -> list[dict]:
     return data if isinstance(data, list) else []
 
 
+def _salvage_truncated_array(text: str) -> Optional[list]:
+    """Recover whatever objects parse from a truncated JSON array.
+
+    Two-tier strategy:
+      1) Fast path — trim at the last `}` and synthesize `]`. Works when
+         at least one top-level object closed cleanly before the cutoff.
+      2) Bracket-balance — when no `}` exists or the fast path produces
+         invalid JSON, walk the text with a JSON state machine, rewind
+         to the last position where a value successfully completed, and
+         synthesize all still-open `}`/`]`. Recovers partially-built
+         objects whose closing braces never made it on the wire.
+    """
+    if not text or "[" not in text:
+        return None
+
+    # ── Tier 1: simple brace truncation ─────────────────────────────
+    last_obj_end = text.rfind("}")
+    if last_obj_end != -1:
+        candidate = text[: last_obj_end + 1] + "]"
+        try:
+            data = json.loads(candidate)
+            if isinstance(data, list):
+                logger.warning(
+                    f"Recovered {len(data)} completed object(s) from "
+                    f"truncated response (likely hit max_output_tokens)"
+                )
+                return data
+        except json.JSONDecodeError:
+            pass
+
+    # ── Tier 2: bracket-balance state machine ───────────────────────
+    return _salvage_partial_json(text)
+
+
+def _salvage_partial_json(text: str) -> Optional[list]:
+    """State-machine salvage for deeply-truncated JSON arrays.
+
+    Walks `text` char by char tracking:
+      - bracket stack (`{` / `[`)
+      - per-level JSON expectation: 'key' | 'colon' | 'val' | 'comma'
+      - the position of the last fully-completed value
+
+    Then trims to that position and synthesizes the brackets needed to
+    close every still-open structure. Mid-key / mid-primitive truncations
+    are correctly discarded because they never advance `last_safe`.
+    """
+    start = text.find("[")
+    if start < 0:
+        return None
+    text = text[start:]
+
+    stack: list[list] = []   # entries: [bracket_char, expectation]
+    in_str = False
+    escape = False
+    last_safe = -1
+
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+
+        # Inside a string: just look for the closing quote (with escape).
+        if in_str:
+            if escape:
+                escape = False
+            elif c == '\\':
+                escape = True
+            elif c == '"':
+                in_str = False
+                if stack:
+                    if stack[-1][1] == 'val':
+                        stack[-1][1] = 'comma'
+                        last_safe = i
+                    elif stack[-1][1] == 'key':
+                        stack[-1][1] = 'colon'
+            i += 1
+            continue
+
+        if c.isspace():
+            i += 1
+            continue
+
+        if c == '"':
+            in_str = True
+            i += 1
+            continue
+
+        if c == '{':
+            stack.append(['{', 'key'])
+            i += 1
+            continue
+
+        if c == '[':
+            stack.append(['[', 'val'])
+            i += 1
+            continue
+
+        if c == '}':
+            if not stack or stack[-1][0] != '{':
+                break
+            stack.pop()
+            if stack:
+                stack[-1][1] = 'comma'
+            last_safe = i
+            i += 1
+            continue
+
+        if c == ']':
+            if not stack or stack[-1][0] != '[':
+                break
+            stack.pop()
+            if stack:
+                stack[-1][1] = 'comma'
+            last_safe = i
+            i += 1
+            if not stack:
+                break
+            continue
+
+        if c == ':':
+            if stack and stack[-1][1] == 'colon':
+                stack[-1][1] = 'val'
+            i += 1
+            continue
+
+        if c == ',':
+            if stack and stack[-1][1] == 'comma':
+                stack[-1][1] = 'key' if stack[-1][0] == '{' else 'val'
+            i += 1
+            continue
+
+        # Primitive (number / true / false / null)
+        if c.isdigit() or c in '-tfn':
+            sv = i
+            while i < n and text[i] not in ',}]' and not text[i].isspace():
+                i += 1
+            if i == n:
+                # Ran off the end mid-primitive — value is unreliable.
+                break
+            primitive = text[sv:i]
+            try:
+                json.loads(primitive)
+                if stack and stack[-1][1] == 'val':
+                    stack[-1][1] = 'comma'
+                    last_safe = i - 1
+            except json.JSONDecodeError:
+                pass
+            continue
+
+        # Unknown char — skip defensively rather than abort.
+        i += 1
+
+    if last_safe < 0:
+        return None
+
+    trimmed = text[: last_safe + 1]
+
+    # Recompute open-bracket pending list against the trimmed text.
+    pending: list[str] = []
+    in_str = False
+    escape = False
+    for ch in trimmed:
+        if escape:
+            escape = False
+            continue
+        if in_str:
+            if ch == '\\':
+                escape = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+            continue
+        if ch in '{[':
+            pending.append(ch)
+        elif ch in '}]':
+            if pending:
+                pending.pop()
+
+    closing = {'{': '}', '[': ']'}
+    salvaged = trimmed + ''.join(closing[ch] for ch in reversed(pending))
+
+    try:
+        data = json.loads(salvaged)
+    except json.JSONDecodeError:
+        return None
+
+    if isinstance(data, list):
+        logger.warning(
+            f"Aggressive recovery: salvaged {len(data)} object(s) from "
+            f"deeply-truncated response (no closing brace existed)"
+        )
+        return data
+    if isinstance(data, dict):
+        return [data]
+    return None
+
+
+_REASONING_MODEL_PREFIXES = ("gpt-5", "o1", "o3", "o4")
+
+
 def extract_conditions_batch(
     triples_batch: list[dict],
     batch_recommendations: list[list[dict]],
     api_key: str = None,
     model: str = None,
+    _retry_depth: int = 0,
 ) -> list[dict]:
-    """Call LLM to extract conditions for a batch of triples."""
+    """Call LLM to extract conditions for a batch of triples.
+
+    Cost-optimized truncation handling: when the response is cut off
+    (max_output_tokens hit), parse what came through, identify which
+    triple_indices are missing, and re-call with ONLY those triples
+    (not the whole batch). One retry max — bounded extra cost.
+    """
     client = _get_openai_client(api_key)
     model = model or config.LLM_MODEL
 
@@ -333,20 +563,58 @@ def extract_conditions_batch(
         {"role": "user", "content": user_message},
     ]
 
-    try:
-        response = client.responses.create(
-            model=model,
-            instructions=CONDITION_SYSTEM_PROMPT,
-            input=input_messages,
-            temperature=0.0,
-            max_output_tokens=config.LLM_MAX_TOKENS,
-            store=False,
-        )
-        return _parse_condition_response(response.output_text)
+    kwargs = dict(
+        model=model,
+        instructions=CONDITION_SYSTEM_PROMPT,
+        input=input_messages,
+        temperature=0.0,
+        max_output_tokens=config.LLM_MAX_TOKENS,
+        store=False,
+    )
+    # Reasoning models burn tokens on internal CoT before emitting output.
+    # "minimal" effort is enough for this structured-extraction task and
+    # leaves the bulk of the budget for the JSON body.
+    if any(model.startswith(p) for p in _REASONING_MODEL_PREFIXES):
+        kwargs["reasoning"] = {"effort": "minimal"}
 
+    try:
+        response = client.responses.create(**kwargs)
     except Exception as e:
         logger.error(f"Condition extraction LLM call failed: {e}")
         return []
+
+    data = _parse_condition_response(response.output_text)
+
+    if _retry_depth >= 1:
+        return data
+
+    # Identify triples that didn't make it into the parsed result
+    # (truncated mid-output, or skipped by the model).
+    expected = set(range(len(triples_batch)))
+    seen = {r.get("triple_index", -1) for r in data if isinstance(r, dict)}
+    missing = sorted(expected - seen)
+    if not missing:
+        return data
+
+    logger.warning(
+        f"Retrying {len(missing)}/{len(triples_batch)} missing triple(s)"
+    )
+    sub_triples = [triples_batch[i] for i in missing]
+    sub_recs = [batch_recommendations[i] for i in missing]
+    retry_data = extract_conditions_batch(
+        sub_triples, sub_recs,
+        api_key=api_key, model=model, _retry_depth=1,
+    )
+    # Map local indices in retry response back to parent batch positions.
+    for r in retry_data:
+        if not isinstance(r, dict):
+            continue
+        local_idx = r.get("triple_index", -1)
+        if isinstance(local_idx, int) and 0 <= local_idx < len(missing):
+            r["triple_index"] = missing[local_idx]
+            data.append(r)
+
+    return data
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -408,6 +676,9 @@ def apply_conditions_to_triples(
       - condition_source: {guideline_id, evidence_level, evidence_texts}
       - recommendation_strength: from matched recommendation
       - has_conditions: boolean
+      - parse_failed: True when the LLM result for this triple was lost
+        (truncation/parse error after retry). Stage 4 (Neo4j) excludes
+        these so the graph never contains uncertain edges.
     """
     result_map = {}
     for cr in condition_results:
@@ -416,7 +687,21 @@ def apply_conditions_to_triples(
 
     augmented = []
     for i, triple in enumerate(triples_batch):
-        cr = result_map.get(i, {})
+        cr = result_map.get(i)
+
+        if cr is None:
+            # LLM result missing for this triple — parse failed and the
+            # one allowed retry also did not return it. Distinguish from
+            # legitimate "no conditions" (empty cr.conditions) by flagging.
+            triple["conditions"] = []
+            triple["condition_logic"] = None
+            triple["condition_source"] = dict(_EMPTY_COND_SOURCE)
+            triple["recommendation_strength"] = None
+            triple["conditions_json"] = "[]"
+            triple["has_conditions"] = False
+            triple["parse_failed"] = True
+            augmented.append(triple)
+            continue
 
         valid_conditions = _normalize_conditions(cr.get("conditions", []))
         source = cr.get("condition_source", {})
@@ -438,6 +723,7 @@ def apply_conditions_to_triples(
             if valid_conditions else "[]"
         )
         triple["has_conditions"] = len(valid_conditions) > 0
+        triple["parse_failed"] = False
 
         augmented.append(triple)
 
@@ -452,7 +738,12 @@ _EMPTY_COND_SOURCE = {"guideline_id": "", "evidence_level": "", "evidence_texts"
 
 
 def _mark_no_conditions(batch: list[dict]) -> list[dict]:
-    """Set empty-condition fields on a batch of triples in place."""
+    """Set empty-condition fields on a batch of triples in place.
+
+    Used for triples that didn't pass the head-tail bidirectional filter.
+    These are intentional empty-condition triples (NOT parse failures),
+    so parse_failed is set False — Stage 4 keeps them in the graph.
+    """
     for triple in batch:
         triple["conditions"] = []
         triple["condition_logic"] = None
@@ -460,15 +751,31 @@ def _mark_no_conditions(batch: list[dict]) -> list[dict]:
         triple["recommendation_strength"] = None
         triple["conditions_json"] = "[]"
         triple["has_conditions"] = False
+        triple["parse_failed"] = False
     return batch
 
 
-def _process_batch(batch: list[dict], batch_recs: list[list[dict]]) -> tuple[list[dict], bool]:
-    """Worker: extract + apply conditions for one batch. Returns (augmented, was_no_recs)."""
-    if not any(batch_recs):
-        return _mark_no_conditions(batch), True
-    condition_results = extract_conditions_batch(batch, batch_recs)
-    return apply_conditions_to_triples(batch, condition_results, batch_recs), False
+def _process_batch(batch: list[dict], batch_recs: list[list[dict]]) -> tuple[list[dict], int]:
+    """
+    Worker: extract + apply conditions for one batch.
+
+    With bidirectional matching, batches commonly mix triples-with-recs and
+    triples-without. Only the former are sent to the LLM; the rest are
+    marked no_conditions in place to save tokens.
+
+    Returns (augmented_batch, no_rec_count_in_batch).
+    """
+    sub_batch = [t for t, recs in zip(batch, batch_recs) if recs]
+    sub_recs = [recs for recs in batch_recs if recs]
+    no_rec_triples = [t for t, recs in zip(batch, batch_recs) if not recs]
+
+    _mark_no_conditions(no_rec_triples)
+
+    if sub_batch:
+        condition_results = extract_conditions_batch(sub_batch, sub_recs)
+        apply_conditions_to_triples(sub_batch, condition_results, sub_recs)
+
+    return batch, len(no_rec_triples)
 
 
 def run_stage3(
@@ -529,6 +836,7 @@ def run_stage3(
     completed_triples = 0
     total_with_cond = 0
     total_cond = 0
+    total_parse_failed = 0
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = {
@@ -537,16 +845,18 @@ def run_stage3(
         }
         for fut in as_completed(futures):
             bi = futures[fut]
-            augmented, was_no_recs = fut.result()
+            augmented, batch_no_recs = fut.result()
             augmented_per_batch[bi] = augmented
             completed_triples += len(augmented)
-            if was_no_recs:
+            total_no_recs += batch_no_recs
+            if batch_no_recs == len(augmented):
                 no_recs_batches += 1
-                total_no_recs += len(augmented)
             for t in augmented:
                 if t.get("has_conditions"):
                     total_with_cond += 1
                     total_cond += len(t.get("conditions", []))
+                if t.get("parse_failed"):
+                    total_parse_failed += 1
             if (completed_triples % progress_interval) < batch_size or completed_triples == len(triples):
                 logger.info(
                     f"  Progress: {completed_triples}/{len(triples)} triples, "
@@ -564,8 +874,14 @@ def run_stage3(
     logger.info(f"  Triples with conditions: {total_with_cond}/{len(all_augmented)} "
                 f"({total_with_cond / max(len(all_augmented), 1) * 100:.1f}%)")
     logger.info(f"  Total conditions: {total_cond}")
-    logger.info(f"  Triples with no matching rec: {total_no_recs} "
-                f"({no_recs_batches} batches skipped LLM)")
+    logger.info(f"  Triples skipped LLM (no head+tail rec match): "
+                f"{total_no_recs}/{len(all_augmented)} "
+                f"({no_recs_batches} batches fully skipped)")
+    if total_parse_failed:
+        logger.warning(
+            f"  Triples with parse failure (will be excluded from Neo4j): "
+            f"{total_parse_failed}/{len(all_augmented)}"
+        )
     logger.info("=" * 60)
 
     return all_augmented
