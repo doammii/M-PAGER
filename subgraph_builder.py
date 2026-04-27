@@ -30,7 +30,6 @@ def build_1hop_subgraph(
     client: UMLSClient,
     seed_cui: str,
     seed_name: str = "",
-    skip_relations: set = None,
 ) -> list[dict]:
     """
     Collect 1-hop subgraph for a seed CUI as a list of triples.
@@ -38,8 +37,6 @@ def build_1hop_subgraph(
     The seed CUI is always the head. The neighbor entity becomes the tail.
     Each triple includes empty condition fields for Stage 3 to populate.
     """
-    skip_relations = skip_relations or config.SKIP_RELATION_LABELS
-
     if not seed_name:
         concept = client.get_concept(seed_cui)
         seed_name = concept.get("name", seed_cui) if concept else seed_cui
@@ -49,9 +46,6 @@ def build_1hop_subgraph(
     triples = []
     for rel in relations:
         rel_label = rel.get("relationLabel", "")
-        if rel_label in skip_relations:
-            continue
-
         additional_label = rel.get("additionalRelationLabel", "")
         related_name = rel.get("relatedIdName", "")
         related_uri = rel.get("relatedId", "")

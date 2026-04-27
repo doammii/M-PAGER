@@ -587,7 +587,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p3.add_argument("--output-dir", default=config.OUTPUT_DIR)
     p3.add_argument("--openai-key", default=None)
     p3.add_argument("--batch-size", type=int, default=None,
-                    help=f"Triples per LLM call (default: {config.STAGE3_BATCH_SIZE})")
+                    help=f"Triples per LLM call (default: {config.STAGE3_LLM_CHUNK_SIZE})")
     p3.add_argument("--max-triples", type=int, default=None,
                     help="Limit triples to process (test mode)")
     p3.add_argument("--max-workers", type=int, default=None,

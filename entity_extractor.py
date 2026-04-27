@@ -280,8 +280,7 @@ def call_openai(
             model=model,
             instructions=_build_system_prompt(),
             input=input_messages,
-            temperature=0.0,
-            max_output_tokens=config.LLM_MAX_TOKENS,
+            reasoning={"effort": config.LLM_REASONING_EFFORT},
             store=False,
         )
         return _parse_llm_response(response.output_text)
