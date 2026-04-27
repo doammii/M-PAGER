@@ -18,7 +18,7 @@ UMLS_RATE_LIMIT_SLEEP = 0.05  # 20 req/s
 # ── LLM API (OpenAI GPT) ──
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "YOUR_OPENAI_API_KEY_HERE")
 LLM_MODEL = "gpt-5.4-mini"
-LLM_MAX_TOKENS = 4096
+LLM_MAX_TOKENS = 16384
 
 # ── CREST Corpus Paths ──
 CREST_XML_DIR = os.environ.get("CREST_XML_DIR", "./crest/xml")
@@ -39,9 +39,17 @@ OUTPUT_TRIPLES_FILE = "stage2_umls_layer_triples.json"
 
 # ── Stage 3 Output ──
 OUTPUT_AUGMENTED_TRIPLES_FILE = "stage3_condition_augmented_triples.json"
-STAGE3_BATCH_SIZE = 5        # triples per LLM call
+STAGE3_BATCH_SIZE = 3        # triples per LLM call
 STAGE3_MAX_RECS_PER_TRIPLE = 3  # max recommendation sentences matched per triple
 STAGE3_PROGRESS_INTERVAL = 20
+
+# ── Stage 4: Neo4j Knowledge Graph ──
+NEO4J_URI = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
+NEO4J_USER = os.environ.get("NEO4J_USER", "neo4j")
+NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD", "neo4j")
+NEO4J_DATABASE = os.environ.get("NEO4J_DATABASE", "neo4j")
+NEO4J_BATCH_SIZE = 500       # rows per UNWIND batch
+OUTPUT_NEO4J_SUMMARY_FILE = "stage4_neo4j_summary.json"
 
 # ── Concurrency ──
 # UMLS shares a 20 req/s ceiling globally; ~8 workers is enough to saturate it
