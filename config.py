@@ -1,7 +1,10 @@
 """
-Configuration for Medical KG Pipeline
-Stage 1: Entity Candidate Extraction (LLM + CREST)
+Configuration for Medical KG Pipeline.
+
+Stage 0: CREST Parsing & Recommendation/Context Extraction
+Stage 1: Entity Candidate Extraction (LLM)
 Stage 2: UMLS Layer Construction (UMLS REST API)
+Stage 3: Condition Augmentation (LLM + CREST context)
 """
 
 import os
@@ -33,7 +36,19 @@ OUTPUT_RECOMMENDATIONS_FILE = "stage0_recommendations.json"
 OUTPUT_ENTITIES_FILE = "stage1_entity_candidates.json"
 OUTPUT_MATCHED_FILE = "stage2_umls_matched.json"
 OUTPUT_TRIPLES_FILE = "stage2_umls_layer_triples.json"
-OUTPUT_PIPELINE_LOG = "pipeline_log.json"
+
+# ── Stage 3 Output ──
+OUTPUT_AUGMENTED_TRIPLES_FILE = "stage3_condition_augmented_triples.json"
+STAGE3_BATCH_SIZE = 5        # triples per LLM call
+STAGE3_MAX_RECS_PER_TRIPLE = 3  # max recommendation sentences matched per triple
+STAGE3_PROGRESS_INTERVAL = 20
+
+# ── Concurrency ──
+# UMLS shares a 20 req/s ceiling globally; ~8 workers is enough to saturate it
+# given typical 200–500 ms request latency.
+UMLS_MAX_WORKERS = 8
+# OpenAI tier-dependent; conservative default keeps us under most RPM limits.
+LLM_MAX_WORKERS = 4
 
 # ── Entity Matcher Settings ──
 MAX_SEARCH_RESULTS_EXACT = 200
@@ -43,15 +58,6 @@ MAX_RELATIONS_PAGE_SIZE = 200
 
 # ── Subgraph Settings ──
 SKIP_RELATION_LABELS = {"SIB"}
-
-# ── Semantic Group Filter ──
-# Applied in Stage 4 (Layer Integration) to filter tail entities.
-# Stage 2 collects all relations without filtering to maximize recall.
-RELEVANT_SEMANTIC_GROUPS = {
-    "DISO", "CHEM", "PROC", "ANAT", "PHYS",
-    "GENE", "LIVB", "DEVI", "PHEN", "CONC",
-    "ACTI", "OBJC",
-}
 
 # ── Primary HTML Context ──
 PRIMARY_CONTEXT_MAX_CHARS = 4000
