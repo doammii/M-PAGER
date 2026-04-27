@@ -57,83 +57,13 @@ def _get_openai_client(api_key: str = None):
 # System Prompt
 # ──────────────────────────────────────────────────────────────────
 
-CONDITION_SYSTEM_PROMPT = """You extract structured conditions from clinical guideline sentences and attach them to medical knowledge graph triples.
-
-[CONDITION TYPES — use ONLY these 4]
-
-1. numeric_threshold
-   {"type":"numeric_threshold","variable":"<str>","comparator":"<str>","value":<num>,"unit":"<str>","evidence_text":"<str>"}
-   Examples: age >= 65, eGFR < 30, HbA1c > 7%, BMI >= 30
-
-2. categorical_state
-   {"type":"categorical_state","variable":"<str>","value":"<str>","evidence_text":"<str>"}
-   Examples: diagnosis=type_2_diabetes, risk=high, pregnancy=true, NYHA_class=III-IV
-
-3. medication_history
-   {"type":"medication_history","drug":"<str>","status":"<str>","dose":"<str or empty>","evidence_text":"<str>"}
-   status: current | prior | failed | discontinued | naive
-
-4. temporal_condition
-   {"type":"temporal_condition","event":"<str>","anchor":"<str>","interval":<num or str>,"interval_unit":"<str>","comparator":"<str>","evidence_text":"<str>"}
-   Examples: within 72h of onset, stable for >= 2 years
-
-[RULES]
-- Only attach conditions that CONSTRAIN the specific triple relation.
-- Do NOT attach conditions irrelevant to the triple.
-- Age ranges (e.g. "55–74 years") → two numeric_threshold conditions (>= and <=).
-- Disease/drug/procedure/gene concepts are GRAPH NODES, not conditions.
-- Patient states, thresholds, time windows, medication status are CONDITIONS.
-- If no relevant condition exists, return empty conditions list.
-- Specify condition_logic: "AND" (default), "OR", or "NOT".
-
-[BREVITY RULES — CRITICAL FOR TOKEN BUDGET]
-- evidence_text MUST be a short key phrase (≤ 50 chars), NOT a full sentence quote.
-- evidence_texts array: AT MOST 2 short phrases; deduplicate.
-- Do NOT repeat the full guideline text or restate the triple.
-- Output compact JSON: no extra whitespace, no trailing commentary.
-
-[OUTPUT FORMAT]
-Return a JSON array. For each input triple, output one object:
-{
-  "triple_index": <int>,
-  "conditions": [ ... structured conditions ... ],
-  "condition_logic": "AND"|"OR"|"NOT",
-  "condition_source": {
-    "guideline_id": "<str>",
-    "evidence_level": "sentence_aligned"|"guideline_cooccurrence"|"inferred",
-    "evidence_texts": ["<str>", ...]
-  }
-}
-
-Respond ONLY with the JSON array. No markdown, no explanation."""
+CONDITION_SYSTEM_PROMPT = """Extract conditions from guideline sentences for medical triples. 4 types: numeric_threshold (age>=65), categorical_state (diagnosis=diabetes), medication_history (drug status), temporal_condition (within 72h). Only include conditions constraining the triple. Keep evidence_text ≤50 chars. Return JSON array only."""
 
 
-FEW_SHOT_USER = """[TRIPLES]
-Triple 0:
-  ("Lung Neoplasms", "screened_by", "Low-dose CT")
+FEW_SHOT_USER = """Triple: ("Lung Neoplasms","screened_by","Low-dose CT")
+Rec: "screening recommended for adults aged 55-74, 30+ pack-years, quit within 15 years" [id: g42]"""
 
-[RECOMMENDATION SENTENCES]
-Rec for Triple 0:
-  "Low-dose CT screening is recommended for adults aged 55 to 74 years with 30 pack-years or more smoking history who quit within the past 15 years."
-  [guideline_id: guideline_042, strength: A]"""
-
-FEW_SHOT_ASSISTANT = """[
-  {
-    "triple_index": 0,
-    "conditions": [
-      {"type":"numeric_threshold","variable":"age","comparator":">=","value":55,"unit":"years","evidence_text":"aged 55 to 74 years"},
-      {"type":"numeric_threshold","variable":"age","comparator":"<=","value":74,"unit":"years","evidence_text":"aged 55 to 74 years"},
-      {"type":"numeric_threshold","variable":"smoking_pack_year","comparator":">=","value":30,"unit":"pack-years","evidence_text":"30 pack-years or more"},
-      {"type":"temporal_condition","event":"smoking_cessation","anchor":"presentation","interval":15,"interval_unit":"years","comparator":"<=","evidence_text":"quit within the past 15 years"}
-    ],
-    "condition_logic": "AND",
-    "condition_source": {
-      "guideline_id": "guideline_042",
-      "evidence_level": "sentence_aligned",
-      "evidence_texts": ["aged 55 to 74 years","30 pack-years or more","quit within the past 15 years"]
-    }
-  }
-]"""
+FEW_SHOT_ASSISTANT = """[{"triple_index":0,"conditions":[{"type":"numeric_threshold","variable":"age","comparator":">=","value":55,"unit":"years","evidence_text":"aged 55-74"},{"type":"numeric_threshold","variable":"age","comparator":"<=","value":74,"unit":"years"},{"type":"numeric_threshold","variable":"smoking_pack_year","comparator":">=","value":30,"unit":"pack-years","evidence_text":"30+ pack-years"}],"condition_logic":"AND","condition_source":{"guideline_id":"g42","evidence_level":"sentence_aligned","evidence_texts":["aged 55-74","30+ pack-years"]}}]"""
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -186,7 +116,7 @@ def build_recommendation_index(
         # Map each matched CUI to these rec indices
         for m in mr.get("matches", []):
             cui = m.get("cui", "")
-            if cui.startswith("C"):
+            if _CUI_RE.match(cui):
                 existing = cui_to_recs.get(cui, set())
                 cui_to_recs[cui] = existing | rec_indices
 
@@ -284,12 +214,17 @@ def _build_user_message(
 
     parts.append("\n[RECOMMENDATION SENTENCES]")
 
+    rec_text_max_chars = getattr(config, "STAGE3_REC_TEXT_MAX_CHARS", 320)
+
     for i, recs in enumerate(batch_recommendations):
         if recs:
             for rec in recs:
                 gid = rec.get("guideline_id", "")
                 strength = rec.get("strength", "")
                 text = rec.get("text", "")
+                if len(text) > rec_text_max_chars:
+                    # Keep key constraints while reducing token pressure.
+                    text = text[:rec_text_max_chars].rsplit(" ", 1)[0] + "..."
                 parts.append(
                     f"Rec for Triple {i}:\n"
                     f'  "{text}"\n'
@@ -302,39 +237,47 @@ def _build_user_message(
 
 
 def _parse_condition_response(response_text: str) -> list[dict]:
-    """Parse LLM JSON array response.
-
-    Handles truncated output (max_output_tokens hit) by salvaging the
-    completed objects up to the last closed `}` and synthesizing the
-    closing `]`.
-    """
+    """Parse LLM JSON array response with robust truncation salvage."""
     text = response_text.strip()
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
     text = text.strip()
-
     try:
         data = json.loads(text)
+        if isinstance(data, dict):
+            return [data]
+        return data if isinstance(data, list) else []
     except json.JSONDecodeError:
         match = re.search(r"\[[\s\S]*\]", text)
         if match:
             try:
                 data = json.loads(match.group())
+                if isinstance(data, dict):
+                    return [data]
+                return data if isinstance(data, list) else []
             except json.JSONDecodeError:
-                data = _salvage_truncated_array(text)
-                if data is None:
-                    logger.warning(f"Failed to parse condition response: {text[:200]}")
-                    return []
-        else:
-            data = _salvage_truncated_array(text)
-            if data is None:
-                logger.warning(f"No JSON array in condition response: {text[:200]}")
-                return []
+                pass
 
-    if isinstance(data, dict):
-        data = [data]
+        salvaged = _salvage_truncated_array(text)
+        if salvaged is not None:
+            return salvaged
 
-    return data if isinstance(data, list) else []
+        logger.warning(f"Failed to parse condition response: {text[:200]}")
+        return []
+
+
+def _completion_token_budget(batch_size: int) -> int:
+    """Estimate output budget from batch size to reduce truncation and waste.
+
+    Heuristic:
+      - small fixed overhead + per-triple allowance
+      - bounded by configured max
+    """
+    max_cap = getattr(config, "LLM_MAX_TOKENS", 4096)
+    base = 240
+    per_triple = 220
+    estimated = base + (per_triple * max(batch_size, 1))
+    return max(512, min(max_cap, estimated))
 
 
 def _salvage_truncated_array(text: str) -> Optional[list]:
@@ -557,7 +500,8 @@ def extract_conditions_batch(
 
     user_message = _build_user_message(triples_batch, batch_recommendations)
 
-    input_messages = [
+    messages = [
+        {"role": "system", "content": CONDITION_SYSTEM_PROMPT},
         {"role": "user", "content": FEW_SHOT_USER},
         {"role": "assistant", "content": FEW_SHOT_ASSISTANT},
         {"role": "user", "content": user_message},
@@ -565,28 +509,48 @@ def extract_conditions_batch(
 
     kwargs = dict(
         model=model,
-        instructions=CONDITION_SYSTEM_PROMPT,
-        input=input_messages,
+        messages=messages,
         temperature=0.0,
-        max_output_tokens=config.LLM_MAX_TOKENS,
-        store=False,
     )
-    # Reasoning models burn tokens on internal CoT before emitting output.
-    # "minimal" effort is enough for this structured-extraction task and
-    # leaves the bulk of the budget for the JSON body.
+
+    token_budget = _completion_token_budget(len(triples_batch))
     if any(model.startswith(p) for p in _REASONING_MODEL_PREFIXES):
-        kwargs["reasoning"] = {"effort": "minimal"}
+        kwargs["max_completion_tokens"] = token_budget
+    else:
+        kwargs["max_tokens"] = token_budget
 
     try:
-        response = client.responses.create(**kwargs)
+        response = client.chat.completions.create(**kwargs)
     except Exception as e:
-        logger.error(f"Condition extraction LLM call failed: {e}")
-        return []
+        msg = str(e)
+        switched = False
 
-    data = _parse_condition_response(response.output_text)
+        # Model-specific token parameter compatibility.
+        if "Unsupported parameter: 'max_tokens'" in msg:
+            v = kwargs.pop("max_tokens", token_budget)
+            kwargs["max_completion_tokens"] = v
+            switched = True
+        elif "Unsupported parameter: 'max_completion_tokens'" in msg:
+            v = kwargs.pop("max_completion_tokens", token_budget)
+            kwargs["max_tokens"] = v
+            switched = True
 
-    if _retry_depth >= 1:
-        return data
+        # Some models do not support temperature.
+        if "Unsupported parameter: 'temperature'" in msg and "temperature" in kwargs:
+            kwargs.pop("temperature", None)
+            switched = True
+
+        if switched:
+            try:
+                response = client.chat.completions.create(**kwargs)
+            except Exception as e2:
+                logger.error(f"Condition extraction LLM call failed after compat retry: {e2}")
+                return []
+        else:
+            logger.error(f"Condition extraction LLM call failed: {e}")
+            return []
+
+    data = _parse_condition_response(response.choices[0].message.content)
 
     # Identify triples that didn't make it into the parsed result
     # (truncated mid-output, or skipped by the model).
@@ -596,25 +560,50 @@ def extract_conditions_batch(
     if not missing:
         return data
 
-    logger.warning(
-        f"Retrying {len(missing)}/{len(triples_batch)} missing triple(s)"
-    )
-    sub_triples = [triples_batch[i] for i in missing]
-    sub_recs = [batch_recommendations[i] for i in missing]
-    retry_data = extract_conditions_batch(
-        sub_triples, sub_recs,
-        api_key=api_key, model=model, _retry_depth=1,
-    )
-    # Map local indices in retry response back to parent batch positions.
-    for r in retry_data:
-        if not isinstance(r, dict):
-            continue
-        local_idx = r.get("triple_index", -1)
-        if isinstance(local_idx, int) and 0 <= local_idx < len(missing):
-            r["triple_index"] = missing[local_idx]
-            data.append(r)
+    max_retry_depth = getattr(config, "STAGE3_MAX_RETRY_DEPTH", 3)
+    if _retry_depth >= max_retry_depth:
+        logger.warning(
+            f"Missing {len(missing)} result(s) after max retries; keeping partial"
+        )
+        return data
 
-    return data
+    logger.warning(
+        f"Retrying {len(missing)}/{len(triples_batch)} missing triple(s) at depth {_retry_depth + 1}"
+    )
+
+    # Split missing set into small chunks so each retry has enough output budget.
+    # This directly reduces truncation while limiting extra calls to only missing items.
+    retry_chunk_size = getattr(config, "STAGE3_RETRY_CHUNK_SIZE", 4)
+    for chunk_start in range(0, len(missing), retry_chunk_size):
+        chunk = missing[chunk_start: chunk_start + retry_chunk_size]
+        sub_triples = [triples_batch[i] for i in chunk]
+        sub_recs = [batch_recommendations[i] for i in chunk]
+        retry_data = extract_conditions_batch(
+            sub_triples,
+            sub_recs,
+            api_key=api_key,
+            model=model,
+            _retry_depth=_retry_depth + 1,
+        )
+
+        # Map local indices in retry response back to parent batch positions.
+        for r in retry_data:
+            if not isinstance(r, dict):
+                continue
+            local_idx = r.get("triple_index", -1)
+            if isinstance(local_idx, int) and 0 <= local_idx < len(chunk):
+                r["triple_index"] = chunk[local_idx]
+                data.append(r)
+
+    # Keep one result per triple index (latest retry result wins).
+    merged_by_idx = {}
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        idx = item.get("triple_index", -1)
+        if isinstance(idx, int):
+            merged_by_idx[idx] = item
+    return list(merged_by_idx.values())
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -772,8 +761,27 @@ def _process_batch(batch: list[dict], batch_recs: list[list[dict]]) -> tuple[lis
     _mark_no_conditions(no_rec_triples)
 
     if sub_batch:
-        condition_results = extract_conditions_batch(sub_batch, sub_recs)
-        apply_conditions_to_triples(sub_batch, condition_results, sub_recs)
+        llm_chunk_size = getattr(config, "STAGE3_LLM_CHUNK_SIZE", 8)
+        all_condition_results: list[dict] = []
+
+        # Micro-batching for LLM only: lowers truncation risk while preserving
+        # overall Stage 3 batch throughput.
+        for start in range(0, len(sub_batch), llm_chunk_size):
+            end = min(start + llm_chunk_size, len(sub_batch))
+            chunk_batch = sub_batch[start:end]
+            chunk_recs = sub_recs[start:end]
+            chunk_results = extract_conditions_batch(chunk_batch, chunk_recs)
+
+            # Local indices in chunk → local indices in sub_batch
+            for r in chunk_results:
+                if not isinstance(r, dict):
+                    continue
+                local_idx = r.get("triple_index", -1)
+                if isinstance(local_idx, int) and 0 <= local_idx < len(chunk_batch):
+                    r["triple_index"] = start + local_idx
+                    all_condition_results.append(r)
+
+        apply_conditions_to_triples(sub_batch, all_condition_results, sub_recs)
 
     return batch, len(no_rec_triples)
 

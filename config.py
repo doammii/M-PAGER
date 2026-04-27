@@ -17,8 +17,8 @@ UMLS_RATE_LIMIT_SLEEP = 0.05  # 20 req/s
 
 # ── LLM API (OpenAI GPT) ──
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "YOUR_OPENAI_API_KEY_HERE")
-LLM_MODEL = "gpt-5.4-mini"
-LLM_MAX_TOKENS = 16384
+LLM_MODEL = "gpt-4o-mini"
+LLM_MAX_TOKENS = 4096
 
 # ── CREST Corpus Paths ──
 CREST_XML_DIR = os.environ.get("CREST_XML_DIR", "./crest/xml")
@@ -39,9 +39,13 @@ OUTPUT_TRIPLES_FILE = "stage2_umls_layer_triples.json"
 
 # ── Stage 3 Output ──
 OUTPUT_AUGMENTED_TRIPLES_FILE = "stage3_condition_augmented_triples.json"
-STAGE3_BATCH_SIZE = 3        # triples per LLM call
+STAGE3_BATCH_SIZE = 20       # triples per LLM call (optimized: reduces API calls 6.7x)
 STAGE3_MAX_RECS_PER_TRIPLE = 3  # max recommendation sentences matched per triple
 STAGE3_PROGRESS_INTERVAL = 20
+STAGE3_LLM_CHUNK_SIZE = 8    # micro-batch size for LLM calls inside each stage3 batch
+STAGE3_REC_TEXT_MAX_CHARS = 320  # truncate long recommendation sentences to save prompt tokens
+STAGE3_RETRY_CHUNK_SIZE = 4   # missing triple retry chunk size (smaller to avoid truncation)
+STAGE3_MAX_RETRY_DEPTH = 3    # bounded recursive retry depth
 
 # ── Stage 4: Neo4j Knowledge Graph ──
 NEO4J_URI = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
@@ -56,7 +60,7 @@ OUTPUT_NEO4J_SUMMARY_FILE = "stage4_neo4j_summary.json"
 # given typical 200–500 ms request latency.
 UMLS_MAX_WORKERS = 8
 # OpenAI tier-dependent; conservative default keeps us under most RPM limits.
-LLM_MAX_WORKERS = 4
+LLM_MAX_WORKERS = 8          # doubled for better parallelism
 
 # ── Entity Matcher Settings ──
 MAX_SEARCH_RESULTS_EXACT = 200
