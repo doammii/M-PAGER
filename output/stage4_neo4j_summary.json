@@ -1,0 +1,23 @@
+{
+  "metadata": {
+    "stage": 4,
+    "elapsed_seconds": 237.3,
+    "timestamp": "2026-04-27T14:20:11.783803",
+    "cleared_first": true
+  },
+  "result": {
+    "ingested": 1683177,
+    "skipped_invalid_id": 0,
+    "skipped_parse_failed": 0,
+    "skipped_parse_failed_legacy": 0,
+    "elapsed_seconds": 213.1,
+    "neo4j_uri": "bolt://localhost:7687",
+    "neo4j_database": "neo4j",
+    "timestamp": "2026-04-27T14:20:10.836802",
+    "nodes": 1050986,
+    "edges": 1683177,
+    "edges_with_conditions": 3897,
+    "unique_relations": 760,
+    "unique_guidelines": 204
+  }
+}
