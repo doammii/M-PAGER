@@ -1,0 +1,253 @@
+{
+  "metadata": {
+    "source_path": "./data/medqa_dev_convo.jsonl",
+    "total_rows": 1272,
+    "num_samples": 10,
+    "random_seed": 42,
+    "sampled_indices": [
+      51,
+      178,
+      209,
+      228,
+      285,
+      457,
+      501,
+      563,
+      1116,
+      1209
+    ]
+  },
+  "samples": [
+    {
+      "id": 51,
+      "question": "Which of the following features are not associated of Waardenburg’s syndrome?",
+      "context": [
+        "A 35-year-old female presents to your office for a routine physical.",
+        "She informs you that she is pregnant, and that the father of her child has Waardenburg’s syndrome.",
+        "She asks you about common findings in Waardenburg’s syndrome."
+      ],
+      "options": {
+        "A": "Heterochromia",
+        "B": "Conductive hearing loss",
+        "C": "Lateral displacement of inner canthi",
+        "D": "Broad nasal root"
+      },
+      "answer": "Conductive hearing loss",
+      "answer_idx": "B"
+    },
+    {
+      "id": 178,
+      "question": "Which of the following intracellular changes is most likely to occur in renal vascular smooth muscle as a result of this drug?",
+      "context": [
+        "A 59-year-old man with long-standing hypertension is brought to the emergency department because of vomiting and headache for 2 hours.",
+        "He reports that he has been unable to refill the prescription for his antihypertensive medications.",
+        "His blood pressure is 210/120 mm Hg.",
+        "Fundoscopy shows bilateral optic disc swelling.",
+        "An ECG shows left ventricular hypertrophy.",
+        "Treatment with intravenous fenoldopam is begun."
+      ],
+      "options": {
+        "A": "Increased activity of protein kinase C",
+        "B": "Increased activity of guanylate cyclase",
+        "C": "Increased production of cyclic adenosine monophosphate",
+        "D": "Increased intracellular concentration of calcium"
+      },
+      "answer": "Increased production of cyclic adenosine monophosphate",
+      "answer_idx": "C"
+    },
+    {
+      "id": 209,
+      "question": "Which of the following is the most likely diagnosis?",
+      "context": [
+        "A 47-year-old man presents to his ophthalmologist for abnormal vision.",
+        "The patient was discharged from the hospital 2 weeks ago after a motor vehicle accident where he was given 1L of blood.",
+        "He also underwent several surgical procedures including enucleation of the right globe and exploratory abdominal laparotomy to stop internal bleeding.",
+        "Currently, he states that he has noticed decreased vision in his left eye.",
+        "The patient has a past medical history of poorly controlled diabetes, asthma, and atopic dermatitis.",
+        "His temperature is 98.9°F (37.2°C), blood pressure is 167/108 mmHg, pulse is 90/min, respirations are 14/min, and oxygen saturation is 97% on room air.",
+        "Physical exam is notable for 20/200 vision in the patient's left eye, which is worse than usual.",
+        "The patient's left eye appears red and irritated."
+      ],
+      "options": {
+        "A": "Anterior uveitis",
+        "B": "Normal post-operative visual adaptations",
+        "C": "Seasonal allergies",
+        "D": "Sympathetic ophthalmia"
+      },
+      "answer": "Sympathetic ophthalmia",
+      "answer_idx": "D"
+    },
+    {
+      "id": 228,
+      "question": "Which of the following is the most appropriate pharmacotherapy?",
+      "context": [
+        "A 33-year-old woman comes to the physician because of a 2-year history of intermittent episodes of pain in all her fingers bilaterally.",
+        "The episodes are worse during the winter.",
+        "The fingers become white when exposed to cold weather, then severely painful and numb once they warm up.",
+        "She has started wearing gloves at all times to prevent these episodes.",
+        "She has generalized anxiety disorder.",
+        "Her mother has systemic lupus erythematosus.",
+        "Current medications include lorazepam and fluoxetine.",
+        "She appears anxious.",
+        "Her temperature is 37.3°C (99.1°F), pulse is 92/min, and blood pressure is 116/72 mm Hg.",
+        "Examination of both hands shows no abnormalities.",
+        "Allen's test is negative.",
+        "Her hemoglobin concentration is 14.4 g/dL, leukocyte count is 9,800/mm3, and platelet count is 156,000/mm3.",
+        "Serum electrolyte concentrations are within normal limits.",
+        "Nailfold capillary microscopy is normal."
+      ],
+      "options": {
+        "A": "Oral aspirin",
+        "B": "Oral nifedipine",
+        "C": "Oral epoprostenol",
+        "D": "Oral prednisone"
+      },
+      "answer": "Oral nifedipine",
+      "answer_idx": "B"
+    },
+    {
+      "id": 285,
+      "question": "What physical finding would suggest involvement of the nerve in its course through the parotid gland?",
+      "context": [
+        "A 73-year-old woman with a past medical history of diabetes, hypertension, and hyperlipidemia presents to the emergency department with swelling in her left neck.",
+        "The onset was a few months ago.",
+        "She has lost 6.8 kg (15.0 lb) over the same duration.",
+        "She denies any fever, night sweats or itching.",
+        "Physical examination reveals a painless swelling in front of her left ear.",
+        "There is painless lymphadenopathy below the ear.",
+        "Biopsy of the lymph nodes reveals mucoepidermoid carcinoma of the parotid gland.",
+        "Surgery is planned and the tumor is removed while trying to preserve a nerve that could be involved."
+      ],
+      "options": {
+        "A": "Loss of taste on the left anterior 2/3 of the tongue",
+        "B": "Hypersensitivity to sound in the left ear",
+        "C": "Inability to smile on the left side",
+        "D": "Numbness of the left cheek"
+      },
+      "answer": "Inability to smile on the left side",
+      "answer_idx": "C"
+    },
+    {
+      "id": 457,
+      "question": "Which of the following is the most likely underlying condition?",
+      "context": [
+        "A 56-year-old woman comes to the emergency department because of severe abdominal pain associated with nausea and vomiting for 12 hours.",
+        "The pain extends from the epigastrium to the right upper quadrant and radiates to the right scapula.",
+        "The patient has gastroesophageal reflux disease.",
+        "She underwent total thyroidectomy for papillary thyroid carcinoma 3 years ago.",
+        "She has smoked one pack of cigarettes daily for 35 years.",
+        "Current medications include levothyroxine, omeprazole, and a multivitamin.",
+        "The patient appears uncomfortable.",
+        "Her temperature is 38.1°C (100.6°F), pulse is 93/min, and blood pressure is 140/85 mm Hg.",
+        "Abdominal examination shows tenderness to deep palpation in the right upper quadrant.",
+        "The patient's leukocyte count is 10,300/mm3.",
+        "Abdominal ultrasonography shows thickening of the gallbladder wall, without dilatation of the intra- and extrahepatic bile ducts.",
+        "Laparoscopic cholecystectomy is performed.",
+        "Pathological examination shows acute cholecystitis.",
+        "There is an ulcerated 1 x 1.5-cm mass in the fundus of the gallbladder with invasion of the gallbladder wall and lymphatic vessels."
+      ],
+      "options": {
+        "A": "Adenocarcinoma of the sigmoid colon",
+        "B": "Cutaneous malignant melanoma",
+        "C": "Multiple endocrine neoplasia",
+        "D": "Squamous cell carcinoma of the esophagus\n\""
+      },
+      "answer": "Cutaneous malignant melanoma",
+      "answer_idx": "B"
+    },
+    {
+      "id": 501,
+      "question": "Of the following options, which is the most likely diagnosis?",
+      "context": [
+        "A 63-year-old African American man with a history of hypertension and dyslipidemia presents to the emergency department with facial swelling and difficulty breathing.",
+        "Symptoms began suddenly that morning and continued to worsen.",
+        "He started taking lisinopril several weeks ago.",
+        "His blood pressure is 110/74 mm Hg, heart rate is 94/min, and respiratory rate is 20/min.",
+        "Physical examination is notable for swelling of his lips and inspiratory stridor.",
+        "Clinical lab results suggest a normal C1 esterase inhibitor level."
+      ],
+      "options": {
+        "A": "Erysipelas",
+        "B": "Facial lymphedema",
+        "C": "Drug-induced angioedema",
+        "D": "Contact dermatitis"
+      },
+      "answer": "Drug-induced angioedema",
+      "answer_idx": "C"
+    },
+    {
+      "id": 563,
+      "question": "Which of the following pathogens should be considered before initiating treatment for the current episode?",
+      "context": [
+        "A 67-year-old man presents to his physician’s office with a progressive cough.",
+        "It has been increasing in intensity over the past week.",
+        "He has also been noticing an increase in the amount of sputum he usually produces, which is thick and yellow.",
+        "He also complains of increased difficulty in breathing, more so than he previously experienced.",
+        "He was diagnosed with chronic obstructive lung disease (COPD) about 3 years ago and has been on treatment for it since then.",
+        "He doesn’t report any fever, chills, or night sweats.",
+        "He has observed a foul smell to his sputum.",
+        "His blood pressure is 100/65 mm Hg, the respirations are 23/min and the pulse is about 110/min.",
+        "Currently, his FEV1 is around 48% of the normal predicted value.",
+        "He is currently receiving a yearly influenza shot and has taken the pneumococcal vaccination at the time of his diagnosis.",
+        "In spite of this, he has had acute exacerbations of his symptoms 4 times over the last year.",
+        "His last episode was 2 months ago, for which he was treated with a short course of antibiotics.",
+        "He is also currently receiving treatment for diabetes."
+      ],
+      "options": {
+        "A": "S. pneumonia",
+        "B": "H. influenzae",
+        "C": "P. aeruginosa",
+        "D": "Syncytial virus"
+      },
+      "answer": "P. aeruginosa",
+      "answer_idx": "C"
+    },
+    {
+      "id": 1116,
+      "question": "Which of the following changes in forced expiratory volume (FEV1) and forced vital capacity (FVC) are expected if she takes a pulmonary function test?",
+      "context": [
+        "A 42-year-old woman presents to the clinic for worsening fatigue and difficulty breathing for the last 6 months.",
+        "Previously, she could routinely walk 3 miles after dinner, but now she can no longer walk more than 2 blocks without being short of breath.",
+        "She also reports being tired soon after starting any type of physical activity.",
+        "On further questioning, she recalls having on and off fevers, occasional night sweats, and losing 5 kg (11 lb) over the last 6 months.",
+        "Her past medical history reveals 2 cesarean deliveries in her twenties and a hospitalization for acute appendicitis in her teens.",
+        "She currently takes no medications and also denies smoking and recreational drug use.",
+        "She drinks half a glass of wine with her evening meals.",
+        "Her vitals include a respiratory rate of 14/min, a pulse rate of 87/min, a blood pressure of 110/89 mm Hg, and a temperature of 36.7°C (98.0°F).",
+        "Physical examination is normal.",
+        "A chest X-ray shows bilateral hilar lymphadenopathy."
+      ],
+      "options": {
+        "A": "FEV1: decrease and FVC: decreased",
+        "B": "FEV1: decreased and FVC: no change",
+        "C": "FEV1: decreased and FVC: increased",
+        "D": "FEV1: no change and FVC: no change"
+      },
+      "answer": "FEV1: decrease and FVC: decreased",
+      "answer_idx": "A"
+    },
+    {
+      "id": 1209,
+      "question": "What is the most likely cause of his hypercalcemia?",
+      "context": [
+        "A 75-year-old man with coronary artery disease and mitral valve stenosis status-post coronary artery bypass graft and mitral bioprosthetic valve replacement is evaluated in the intensive care unit.",
+        "His postsurgical course was complicated by ventilator-associated pneumonia and bilateral postoperative pleural effusions requiring chest tubes.",
+        "He has been weaned from the ventilator and has had his chest tubes removed but has required frequent suctioning to minimize aspirations.",
+        "He has been dependent on a percutaneous gastrostomy tube for enteral nutrition for the past four weeks.",
+        "He is currently on aspirin, carvedilol, atorvastatin, ceftazidime, and pantoprazole.",
+        "He has a history of prostate cancer status post radical prostatectomy.",
+        "His temperature is 96°F (35.6°C), blood pressure is 95/55 mmHg, pulse is 50/min, and respirations are 20/min.",
+        "On physical exam, he is not alert and oriented but responds with moans when stimulated.",
+        "His laboratory data are listed below: |  | Serum: | Na+: 145 mEq/L | Cl-: 110 mEq/L | K+: 3.4 mEq/L | HCO3-: 26 mEq/L | BUN: 10 mg/dL | Glucose: 112 mg/dL | Creatinine: 1.4 mg/dL | Thyroid-stimulating hormone: 10 µU/mL | Ca2+: 11.1 mg/dL | PO4-: 1.0 mg/dL | AST: 6 U/L | ALT: 10 U/L | Albumin: 2.5 mg/dL | Lactate dehydrogenase: 200 U/L (140-280 U/L) | Haptoglobin: 150 mg/dL (30-200 mg/dL) | 1,25-(OH)2 D3: 10 pg/mL (15-75 pg/mL) | Parathyroid hormone: 9 pg/mL (10-60 pg/mL) |  | Leukocyte count: 10,000 cells/mm^3 with normal differential | Hemoglobin: 9 g/dL | Hematocrit: 30 % | Platelet count: 165,000 /mm^3 |  | His electrocardiogram and chest radiograph are shown in Figures A and B."
+      ],
+      "options": {
+        "A": "Euthyroid sick syndrome",
+        "B": "Immobilization",
+        "C": "Malignancy",
+        "D": "Primary hyperparathyroidism"
+      },
+      "answer": "Immobilization",
+      "answer_idx": "B"
+    }
+  ]
+}
